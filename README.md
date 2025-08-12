@@ -62,13 +62,13 @@ proxmox-mcp
 
 ## Configure in Cursor
 
-Edit `~/.cursor/mcp.json`:
+Edit `~/.cursor/mcp.json` (portable example):
 
 ```json
 {
   "mcpServers": {
     "proxmox-mcp": {
-      "command": "/Users/bsahane/Developer/cursor/mcp-proxmox/.venv/bin/python",
+      "command": "python",
       "args": ["-m", "proxmox_mcp.server"]
     }
   }
@@ -83,7 +83,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "proxmox-mcp": {
-      "command": "/Users/bsahane/Developer/cursor/mcp-proxmox/.venv/bin/python",
+      "command": "python",
       "args": ["-m", "proxmox_mcp.server"]
     }
   }
