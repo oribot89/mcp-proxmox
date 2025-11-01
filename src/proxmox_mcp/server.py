@@ -3392,16 +3392,32 @@ def main() -> None:
         @app.get("/tools")
         async def list_tools():
             """List all available MCP tools"""
-            # Get tools from server
-            tools = getattr(server, 'tools', {}) or getattr(server, '_tool_registry', {})
+            # Get tools from FastMCP server
+            # FastMCP stores tools in _tool_handlers
+            tools_dict = {}
+            if hasattr(server, '_tool_handlers'):
+                tools_dict = server._tool_handlers
+            elif hasattr(server, 'tools'):
+                tools_dict = server.tools
+            elif hasattr(server, '_tool_registry'):
+                tools_dict = server._tool_registry
+            
+            tools_list = []
+            for name, handler in tools_dict.items():
+                # Extract function from handler
+                func = handler if callable(handler) else getattr(handler, 'func', None)
+                description = "No description available"
+                if func and hasattr(func, '__doc__') and func.__doc__:
+                    description = func.__doc__.strip().split('\n')[0]  # First line only
+                
+                tools_list.append({
+                    "name": name,
+                    "description": description
+                })
+            
             return {
-                "tools": [
-                    {
-                        "name": name,
-                        "description": tool.__doc__ or "No description available"
-                    }
-                    for name, tool in tools.items()
-                ]
+                "total": len(tools_list),
+                "tools": tools_list
             }
         
         @app.post("/execute")
@@ -3418,14 +3434,30 @@ def main() -> None:
                         content={"error": "Missing 'tool' parameter"}
                     )
                 
-                # Get the tool function
-                tools = getattr(server, 'tools', {}) or getattr(server, '_tool_registry', {})
-                tool_func = tools.get(tool_name)
+                # Get the tool handler from FastMCP
+                tools_dict = {}
+                if hasattr(server, '_tool_handlers'):
+                    tools_dict = server._tool_handlers
+                elif hasattr(server, 'tools'):
+                    tools_dict = server.tools
+                elif hasattr(server, '_tool_registry'):
+                    tools_dict = server._tool_registry
                 
-                if not tool_func:
+                tool_handler = tools_dict.get(tool_name)
+                
+                if not tool_handler:
                     return JSONResponse(
                         status_code=404,
                         content={"error": f"Tool '{tool_name}' not found"}
+                    )
+                
+                # Extract the actual function
+                tool_func = tool_handler if callable(tool_handler) else getattr(tool_handler, 'func', None)
+                
+                if not tool_func:
+                    return JSONResponse(
+                        status_code=500,
+                        content={"error": f"Tool '{tool_name}' is not callable"}
                     )
                 
                 # Execute the tool
@@ -3437,6 +3469,15 @@ def main() -> None:
                     "result": result
                 }
                 
+            except TypeError as e:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "success": False,
+                        "error": f"Invalid parameters: {str(e)}",
+                        "type": "TypeError"
+                    }
+                )
             except Exception as e:
                 return JSONResponse(
                     status_code=500,
