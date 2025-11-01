@@ -740,6 +740,24 @@ class ProxmoxClient:
     def set_vm_description(self, node: str, vmid: int, description: str) -> str:
         """Set VM description/notes."""
         return self._api.nodes(node).qemu(vmid).config.put(description=description)
+    
+    def get_vm_notes(self, node: str, vmid: int) -> str:
+        """Get VM description/notes."""
+        config = self._api.nodes(node).qemu(vmid).config.get()
+        return config.get("description", "")
+    
+    def set_vm_notes(self, node: str, vmid: int, notes: str) -> str:
+        """Set VM description/notes."""
+        return self.set_vm_description(node, vmid, notes)
+    
+    def get_lxc_notes(self, node: str, ctid: int) -> str:
+        """Get LXC description/notes."""
+        config = self._api.nodes(node).lxc(ctid).config.get()
+        return config.get("description", "")
+    
+    def set_lxc_notes(self, node: str, ctid: int, notes: str) -> str:
+        """Set LXC description/notes."""
+        return self._api.nodes(node).lxc(ctid).config.put(description=notes)
 
     def get_cluster_vms(self, cluster_name: str) -> List[Dict[str, Any]]:
         """Get all VMs belonging to a cluster."""
