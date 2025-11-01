@@ -7,7 +7,8 @@ from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
 
 from .client import ProxmoxClient
-from .utils import read_env, require_confirm, format_size
+from .utils import read_env, require_confirm, format_size, is_multi_cluster_mode
+from .cluster_manager import get_cluster_registry
 from .cloudinit import CloudInitConfig, CloudInitProvisioner, get_ubuntu_web_server_config, get_docker_host_config, get_development_config
 from .rhcos import IgnitionConfig, RHCOSProvisioner, OpenShiftInstaller
 from .windows import WindowsConfig, WindowsProvisioner, get_windows_web_server_config, get_windows_domain_controller_config
@@ -21,6 +22,7 @@ from .monitoring import MonitoringManager
 from .storage_advanced import AdvancedStorageManager
 from .ai_optimization import AIOptimizationManager
 from .integrations import IntegrationManager
+from .notes_manager import NotesManager
 
 
 server = FastMCP("proxmox-mcp")
@@ -32,10 +34,179 @@ load_dotenv()
 
 # ---------- Helpers ----------
 
-def get_client() -> ProxmoxClient:
-    # Validate env early for clearer errors
-    read_env()
-    return ProxmoxClient.from_env()
+def get_client(cluster_name: Optional[str] = None) -> ProxmoxClient:
+    """
+    Get Proxmox client. Supports both single-cluster and multi-cluster mode.
+    
+    In multi-cluster mode (when PROXMOX_CLUSTERS environment variable is set),
+    this will return a client for the specified cluster or the default cluster.
+    
+    In single-cluster mode, cluster_name is ignored and the default client is returned.
+    
+    Args:
+        cluster_name: Optional cluster name. Only used in multi-cluster mode.
+        
+    Returns:
+        ProxmoxClient instance configured for the specified (or default) cluster.
+    """
+    if is_multi_cluster_mode():
+        # Multi-cluster mode: use cluster registry
+        registry = get_cluster_registry()
+        return registry.get_client(cluster_name)
+    else:
+        # Single-cluster mode: use environment variables
+        read_env()
+        return ProxmoxClient.from_env()
+
+
+# ---------- Multi-Cluster Helper Tools ----------
+
+@server.tool("proxmox-list-all-clusters")
+async def proxmox_list_all_clusters() -> List[str]:
+    """
+    List all configured Proxmox clusters.
+    
+    Returns empty list in single-cluster mode.
+    """
+    if not is_multi_cluster_mode():
+        return []
+    
+    registry = get_cluster_registry()
+    return registry.list_clusters()
+
+
+@server.tool("proxmox-list-all-nodes-from-all-clusters")
+async def proxmox_list_all_nodes_from_all_clusters() -> Dict[str, Any]:
+    """
+    List ALL nodes from ALL configured clusters.
+    
+    This is a convenience tool that aggregates nodes from all clusters.
+    In single-cluster mode, returns nodes from the single cluster.
+    
+    Returns:
+        Dict with cluster names as keys and node lists as values
+    """
+    if not is_multi_cluster_mode():
+        # Single cluster mode
+        client = get_client()
+        nodes = client.list_nodes()
+        return {"default": nodes}
+    
+    # Multi-cluster mode
+    registry = get_cluster_registry()
+    result = {}
+    
+    for cluster_name in registry.list_clusters():
+        try:
+            client = get_client(cluster_name)
+            nodes = client.list_nodes()
+            result[cluster_name] = nodes
+        except Exception as e:
+            result[cluster_name] = {"error": str(e)}
+    
+    return result
+
+
+@server.tool("proxmox-list-all-vms-from-all-clusters")
+async def proxmox_list_all_vms_from_all_clusters() -> Dict[str, Any]:
+    """
+    List ALL VMs from ALL configured clusters.
+    
+    This is a convenience tool that aggregates VMs from all clusters.
+    In single-cluster mode, returns VMs from the single cluster.
+    
+    Returns:
+        Dict with cluster names as keys and VM lists as values
+    """
+    if not is_multi_cluster_mode():
+        # Single cluster mode
+        client = get_client()
+        vms = client.list_vms()
+        return {"default": vms}
+    
+    # Multi-cluster mode
+    registry = get_cluster_registry()
+    result = {}
+    
+    for cluster_name in registry.list_clusters():
+        try:
+            client = get_client(cluster_name)
+            vms = client.list_vms()
+            result[cluster_name] = vms
+        except Exception as e:
+            result[cluster_name] = {"error": str(e)}
+    
+    return result
+
+
+@server.tool("proxmox-get-all-cluster-status")
+async def proxmox_get_all_cluster_status() -> Dict[str, Any]:
+    """
+    Get comprehensive status of ALL configured clusters.
+    
+    Returns detailed information including:
+    - Cluster connectivity
+    - Node status
+    - Resource counts (VMs, containers, storage)
+    - Health metrics
+    
+    Returns:
+        Dict with cluster names as keys and status info as values
+    """
+    if not is_multi_cluster_mode():
+        # Single cluster mode
+        client = get_client()
+        try:
+            nodes = client.list_nodes()
+            vms = client.list_vms()
+            storage = client.list_storage()
+            
+            return {
+                "default": {
+                    "status": "online",
+                    "nodes": nodes,
+                    "nodes_count": len(nodes),
+                    "vms_count": len(vms),
+                    "storage_count": len(storage)
+                }
+            }
+        except Exception as e:
+            return {"default": {"status": "error", "message": str(e)}}
+    
+    # Multi-cluster mode
+    registry = get_cluster_registry()
+    result = {}
+    
+    for cluster_name in registry.list_clusters():
+        try:
+            client = get_client(cluster_name)
+            
+            # Get basic info
+            nodes = client.list_nodes()
+            vms = client.list_vms()
+            storage = client.list_storage()
+            
+            # Count running/stopped VMs
+            running_vms = [vm for vm in vms if vm.get('status') == 'running']
+            stopped_vms = [vm for vm in vms if vm.get('status') == 'stopped']
+            
+            result[cluster_name] = {
+                "status": "online",
+                "nodes": nodes,
+                "nodes_count": len(nodes),
+                "vms_total": len(vms),
+                "vms_running": len(running_vms),
+                "vms_stopped": len(stopped_vms),
+                "storage_count": len(storage),
+                "cluster_info": registry.get_cluster_info(cluster_name)
+            }
+        except Exception as e:
+            result[cluster_name] = {
+                "status": "error",
+                "message": str(e)
+            }
+    
+    return result
 
 
 # ---------- Core discovery ----------
@@ -2760,6 +2931,334 @@ async def proxmox_integrate_service(
     if notification_types is None:
         notification_types = ["alerts", "deployments"]
     return await integration_manager.integrate_service(service_type, credentials, notification_types, webhook_url, dry_run)
+
+
+# ---------- VM/LXC Notes Management ----------
+
+@server.tool("proxmox-vm-notes-read")
+async def proxmox_vm_notes_read(
+    vmid: Optional[int] = None,
+    name: Optional[str] = None,
+    node: Optional[str] = None,
+    format: str = "auto",
+    parse_secrets: bool = True
+) -> Dict[str, Any]:
+    """Read VM description/notes with format detection and secret reference parsing"""
+    client = get_client()
+    notes_manager = NotesManager(client)
+    
+    # Resolve VM
+    vm_vmid, vm_node, vm_info = client.resolve_vm(vmid=vmid, name=name, node=node)
+    
+    # Get notes
+    notes_content = client.get_vm_notes(vm_node, vm_vmid)
+    
+    # Format output
+    formatted = notes_manager.format_notes_output(notes_content, format, parse_secrets)
+    
+    return {
+        "vm": {
+            "vmid": vm_vmid,
+            "name": vm_info.get("name"),
+            "node": vm_node
+        },
+        "notes": formatted
+    }
+
+
+@server.tool("proxmox-vm-notes-update")
+async def proxmox_vm_notes_update(
+    content: str,
+    vmid: Optional[int] = None,
+    name: Optional[str] = None,
+    node: Optional[str] = None,
+    format: str = "auto",
+    validate: bool = True,
+    backup: bool = True,
+    confirm: Optional[bool] = None,
+    dry_run: bool = False
+) -> Dict[str, Any]:
+    """Update VM description/notes with validation and backup"""
+    client = get_client()
+    notes_manager = NotesManager(client)
+    
+    # Resolve VM
+    vm_vmid, vm_node, vm_info = client.resolve_vm(vmid=vmid, name=name, node=node)
+    
+    # Validate content if requested
+    warnings = []
+    if validate:
+        is_valid, validation_warnings = notes_manager.validate_content(content)
+        warnings.extend(validation_warnings)
+        
+        if not is_valid:
+            return {
+                "success": False,
+                "error": "Content validation failed",
+                "warnings": warnings
+            }
+    
+    # Get backup of existing notes if requested
+    previous_notes = None
+    if backup:
+        previous_notes = client.get_vm_notes(vm_node, vm_vmid)
+    
+    if dry_run:
+        return {
+            "dry_run": True,
+            "action": "update-vm-notes",
+            "vm": {
+                "vmid": vm_vmid,
+                "name": vm_info.get("name"),
+                "node": vm_node
+            },
+            "content_length": len(content),
+            "format": notes_manager.detect_format(content),
+            "warnings": warnings,
+            "previous_notes_length": len(previous_notes) if previous_notes else 0
+        }
+    
+    require_confirm(confirm)
+    
+    # Update notes
+    result = client.set_vm_notes(vm_node, vm_vmid, content)
+    
+    return {
+        "success": True,
+        "vm": {
+            "vmid": vm_vmid,
+            "name": vm_info.get("name"),
+            "node": vm_node
+        },
+        "previous_notes": previous_notes if backup else None,
+        "warnings": warnings,
+        "result": result
+    }
+
+
+@server.tool("proxmox-vm-notes-remove")
+async def proxmox_vm_notes_remove(
+    vmid: Optional[int] = None,
+    name: Optional[str] = None,
+    node: Optional[str] = None,
+    backup: bool = True,
+    confirm: Optional[bool] = None,
+    dry_run: bool = False
+) -> Dict[str, Any]:
+    """Remove VM description/notes with backup option"""
+    client = get_client()
+    
+    # Resolve VM
+    vm_vmid, vm_node, vm_info = client.resolve_vm(vmid=vmid, name=name, node=node)
+    
+    # Get backup of existing notes if requested
+    backup_notes = None
+    if backup:
+        backup_notes = client.get_vm_notes(vm_node, vm_vmid)
+    
+    if dry_run:
+        return {
+            "dry_run": True,
+            "action": "remove-vm-notes",
+            "vm": {
+                "vmid": vm_vmid,
+                "name": vm_info.get("name"),
+                "node": vm_node
+            },
+            "backup_notes_length": len(backup_notes) if backup_notes else 0
+        }
+    
+    require_confirm(confirm)
+    
+    # Remove notes by setting empty string
+    result = client.set_vm_notes(vm_node, vm_vmid, "")
+    
+    return {
+        "success": True,
+        "vm": {
+            "vmid": vm_vmid,
+            "name": vm_info.get("name"),
+            "node": vm_node
+        },
+        "backup_notes": backup_notes if backup else None,
+        "result": result
+    }
+
+
+@server.tool("proxmox-lxc-notes-read")
+async def proxmox_lxc_notes_read(
+    vmid: Optional[int] = None,
+    name: Optional[str] = None,
+    node: Optional[str] = None,
+    format: str = "auto",
+    parse_secrets: bool = True
+) -> Dict[str, Any]:
+    """Read LXC description/notes with format detection and secret reference parsing"""
+    client = get_client()
+    notes_manager = NotesManager(client)
+    
+    # Resolve LXC
+    ct_vmid, ct_node, ct_info = client.resolve_lxc(vmid=vmid, name=name, node=node)
+    
+    # Get notes
+    notes_content = client.get_lxc_notes(ct_node, ct_vmid)
+    
+    # Format output
+    formatted = notes_manager.format_notes_output(notes_content, format, parse_secrets)
+    
+    return {
+        "lxc": {
+            "vmid": ct_vmid,
+            "name": ct_info.get("name"),
+            "node": ct_node
+        },
+        "notes": formatted
+    }
+
+
+@server.tool("proxmox-lxc-notes-update")
+async def proxmox_lxc_notes_update(
+    content: str,
+    vmid: Optional[int] = None,
+    name: Optional[str] = None,
+    node: Optional[str] = None,
+    format: str = "auto",
+    validate: bool = True,
+    backup: bool = True,
+    confirm: Optional[bool] = None,
+    dry_run: bool = False
+) -> Dict[str, Any]:
+    """Update LXC description/notes with validation and backup"""
+    client = get_client()
+    notes_manager = NotesManager(client)
+    
+    # Resolve LXC
+    ct_vmid, ct_node, ct_info = client.resolve_lxc(vmid=vmid, name=name, node=node)
+    
+    # Validate content if requested
+    warnings = []
+    if validate:
+        is_valid, validation_warnings = notes_manager.validate_content(content)
+        warnings.extend(validation_warnings)
+        
+        if not is_valid:
+            return {
+                "success": False,
+                "error": "Content validation failed",
+                "warnings": warnings
+            }
+    
+    # Get backup of existing notes if requested
+    previous_notes = None
+    if backup:
+        previous_notes = client.get_lxc_notes(ct_node, ct_vmid)
+    
+    if dry_run:
+        return {
+            "dry_run": True,
+            "action": "update-lxc-notes",
+            "lxc": {
+                "vmid": ct_vmid,
+                "name": ct_info.get("name"),
+                "node": ct_node
+            },
+            "content_length": len(content),
+            "format": notes_manager.detect_format(content),
+            "warnings": warnings,
+            "previous_notes_length": len(previous_notes) if previous_notes else 0
+        }
+    
+    require_confirm(confirm)
+    
+    # Update notes
+    result = client.set_lxc_notes(ct_node, ct_vmid, content)
+    
+    return {
+        "success": True,
+        "lxc": {
+            "vmid": ct_vmid,
+            "name": ct_info.get("name"),
+            "node": ct_node
+        },
+        "previous_notes": previous_notes if backup else None,
+        "warnings": warnings,
+        "result": result
+    }
+
+
+@server.tool("proxmox-lxc-notes-remove")
+async def proxmox_lxc_notes_remove(
+    vmid: Optional[int] = None,
+    name: Optional[str] = None,
+    node: Optional[str] = None,
+    backup: bool = True,
+    confirm: Optional[bool] = None,
+    dry_run: bool = False
+) -> Dict[str, Any]:
+    """Remove LXC description/notes with backup option"""
+    client = get_client()
+    
+    # Resolve LXC
+    ct_vmid, ct_node, ct_info = client.resolve_lxc(vmid=vmid, name=name, node=node)
+    
+    # Get backup of existing notes if requested
+    backup_notes = None
+    if backup:
+        backup_notes = client.get_lxc_notes(ct_node, ct_vmid)
+    
+    if dry_run:
+        return {
+            "dry_run": True,
+            "action": "remove-lxc-notes",
+            "lxc": {
+                "vmid": ct_vmid,
+                "name": ct_info.get("name"),
+                "node": ct_node
+            },
+            "backup_notes_length": len(backup_notes) if backup_notes else 0
+        }
+    
+    require_confirm(confirm)
+    
+    # Remove notes by setting empty string
+    result = client.set_lxc_notes(ct_node, ct_vmid, "")
+    
+    return {
+        "success": True,
+        "lxc": {
+            "vmid": ct_vmid,
+            "name": ct_info.get("name"),
+            "node": ct_node
+        },
+        "backup_notes": backup_notes if backup else None,
+        "result": result
+    }
+
+
+@server.tool("proxmox-notes-template")
+async def proxmox_notes_template(
+    template_type: str,
+    format: str = "html",
+    variables: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Generate notes template with optional variable substitution"""
+    client = get_client()
+    notes_manager = NotesManager(client)
+    
+    # Generate template
+    template_content = notes_manager.generate_template(template_type, format, variables)
+    
+    # Extract variables used
+    import re
+    variables_used = re.findall(r'\{([A-Z_]+)\}', template_content)
+    
+    return {
+        "template": template_content,
+        "template_type": template_type,
+        "format": format,
+        "variables_used": list(set(variables_used)),
+        "length": len(template_content)
+    }
 
 
 def main() -> None:
