@@ -23,6 +23,7 @@ from .storage_advanced import AdvancedStorageManager
 from .ai_optimization import AIOptimizationManager
 from .integrations import IntegrationManager
 from .notes_manager import NotesManager
+from .container_ops import ContainerOperations
 
 
 server = FastMCP("proxmox-mcp")
@@ -3259,6 +3260,202 @@ async def proxmox_notes_template(
         "variables_used": list(set(variables_used)),
         "length": len(template_content)
     }
+
+
+# ---------- Container Operations ----------
+
+@server.tool("proxmox-container-exec")
+async def proxmox_container_exec(
+    vmid: int,
+    command: str,
+    timeout: int = 30
+) -> Dict[str, Any]:
+    """
+    Execute command inside LXC container.
+    
+    Uses pct exec to run commands directly in the container.
+    Requires SSH access to Proxmox host and pct command available.
+    
+    Args:
+        vmid: Container ID
+        command: Command to execute (e.g., "systemctl status nginx")
+        timeout: Command timeout in seconds (default: 30)
+    
+    Returns:
+        Dict with execution results:
+        - success: bool (True if command succeeded)
+        - output: str (stdout)
+        - error: str (stderr if any)
+        - exit_code: int (0 = success)
+    
+    Examples:
+        - Execute: proxmox-container-exec vmid=103 command="apt-get update"
+        - Check service: proxmox-container-exec vmid=103 command="systemctl status nginx"
+        - Get hostname: proxmox-container-exec vmid=103 command="hostname"
+    """
+    from .container_ops import ContainerOperations
+    
+    # Get Proxmox host from environment or default
+    proxmox_host = os.getenv("PROXMOX_HOST", "localhost")
+    ssh_key = os.getenv("PROXMOX_SSH_KEY")
+    
+    ops = ContainerOperations(proxmox_host, ssh_key=ssh_key)
+    result = ops.exec_in_container(vmid, command, timeout=timeout)
+    
+    return result
+
+
+@server.tool("proxmox-container-push-file")
+async def proxmox_container_push_file(
+    vmid: int,
+    local_path: str,
+    remote_path: str
+) -> Dict[str, Any]:
+    """
+    Copy file from host into LXC container.
+    
+    Uses base64 encoding to safely transfer files through SSH.
+    Automatically creates destination directory if needed.
+    
+    Args:
+        vmid: Container ID
+        local_path: Path to file on Proxmox host
+        remote_path: Destination path inside container
+    
+    Returns:
+        Dict with transfer status:
+        - success: bool
+        - message: str
+        - file_size: int (bytes)
+    
+    Examples:
+        - Push app: proxmox-container-push-file vmid=103 local_path="/tmp/app.py" remote_path="/opt/app/app.py"
+        - Push config: proxmox-container-push-file vmid=103 local_path="/tmp/nginx.conf" remote_path="/etc/nginx/nginx.conf"
+    """
+    from .container_ops import ContainerOperations
+    
+    proxmox_host = os.getenv("PROXMOX_HOST", "localhost")
+    ssh_key = os.getenv("PROXMOX_SSH_KEY")
+    
+    ops = ContainerOperations(proxmox_host, ssh_key=ssh_key)
+    result = ops.push_file_to_container(vmid, local_path, remote_path)
+    
+    return result
+
+
+@server.tool("proxmox-container-pull-file")
+async def proxmox_container_pull_file(
+    vmid: int,
+    remote_path: str,
+    local_path: str
+) -> Dict[str, Any]:
+    """
+    Copy file from LXC container to host.
+    
+    Uses base64 encoding for safe transfer. Creates parent directories if needed.
+    
+    Args:
+        vmid: Container ID
+        remote_path: Path to file inside container
+        local_path: Destination path on Proxmox host
+    
+    Returns:
+        Dict with transfer status:
+        - success: bool
+        - message: str
+        - file_size: int (bytes)
+    
+    Examples:
+        - Pull logs: proxmox-container-pull-file vmid=103 remote_path="/var/log/app.log" local_path="/tmp/app.log"
+    """
+    from .container_ops import ContainerOperations
+    
+    proxmox_host = os.getenv("PROXMOX_HOST", "localhost")
+    ssh_key = os.getenv("PROXMOX_SSH_KEY")
+    
+    ops = ContainerOperations(proxmox_host, ssh_key=ssh_key)
+    result = ops.pull_file_from_container(vmid, remote_path, local_path)
+    
+    return result
+
+
+@server.tool("proxmox-container-check-network")
+async def proxmox_container_check_network(
+    vmid: int,
+    test_ip: str = "10.0.0.1",
+    timeout: int = 5
+) -> Dict[str, Any]:
+    """
+    Check if container network is operational.
+    
+    Pings a test IP from within the container to verify network connectivity.
+    Useful for verifying container is ready before deployments.
+    
+    Args:
+        vmid: Container ID
+        test_ip: IP to ping (default: 10.0.0.1, typical gateway)
+        timeout: Ping timeout in seconds (default: 5)
+    
+    Returns:
+        Dict with network status:
+        - online: bool (True if reachable)
+        - latency_ms: float (round-trip time, or None)
+        - error: str (error message if offline)
+    
+    Examples:
+        - Check container online: proxmox-container-check-network vmid=103
+        - Check internet: proxmox-container-check-network vmid=103 test_ip="8.8.8.8"
+    """
+    from .container_ops import ContainerOperations
+    
+    proxmox_host = os.getenv("PROXMOX_HOST", "localhost")
+    ssh_key = os.getenv("PROXMOX_SSH_KEY")
+    
+    ops = ContainerOperations(proxmox_host, ssh_key=ssh_key)
+    result = ops.check_container_network(vmid, test_ip=test_ip, timeout=timeout)
+    
+    return result
+
+
+@server.tool("proxmox-container-wait-network")
+async def proxmox_container_wait_network(
+    vmid: int,
+    max_retries: int = 30,
+    retry_delay: int = 5,
+    test_ip: str = "10.0.0.1"
+) -> Dict[str, Any]:
+    """
+    Wait for container network to come online.
+    
+    Polls container network status until online or max retries reached.
+    Useful for scripts that need to wait for container to be ready.
+    
+    Args:
+        vmid: Container ID
+        max_retries: Maximum retry attempts (default: 30 = ~2.5 min)
+        retry_delay: Delay between retries in seconds (default: 5)
+        test_ip: IP to test (default: 10.0.0.1)
+    
+    Returns:
+        Dict with wait results:
+        - online: bool
+        - attempts: int (number of attempts made)
+        - total_wait_ms: float (total wait time)
+        - error: str (if timeout)
+    
+    Examples:
+        - Wait up to 2.5 min: proxmox-container-wait-network vmid=103
+        - Wait up to 5 min: proxmox-container-wait-network vmid=103 max_retries=60
+    """
+    from .container_ops import ContainerOperations
+    
+    proxmox_host = os.getenv("PROXMOX_HOST", "localhost")
+    ssh_key = os.getenv("PROXMOX_SSH_KEY")
+    
+    ops = ContainerOperations(proxmox_host, ssh_key=ssh_key)
+    result = ops.wait_for_container_network(vmid, max_retries, retry_delay, test_ip)
+    
+    return result
 
 
 def main() -> None:
