@@ -24,6 +24,7 @@ from .ai_optimization import AIOptimizationManager
 from .integrations import IntegrationManager
 from .notes_manager import NotesManager
 from .container_ops import ContainerOperations
+from .deployment_tools import DeploymentTools
 
 
 server = FastMCP("proxmox-mcp")
@@ -3454,6 +3455,166 @@ async def proxmox_container_wait_network(
     
     ops = ContainerOperations(proxmox_host, ssh_key=ssh_key)
     result = ops.wait_for_container_network(vmid, max_retries, retry_delay, test_ip)
+    
+    return result
+
+
+# ---------- Deployment Tools ----------
+# These tools automate service deployment, nginx configuration, and container bootstrapping
+# to reduce deployment time from 2.5 hours to <30 minutes
+
+@server.tool("deployment-container-bootstrap")
+async def deployment_container_bootstrap(
+    ctid: int,
+    packages: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    Bootstrap a container with common packages (git, python3-venv, pip, etc).
+    
+    Idempotent operation - safe to run multiple times.
+    Saves ~3 minutes of manual package installation per container.
+    
+    Args:
+        ctid: Container ID
+        packages: List of packages to install (default: git, python3-venv, python3-pip, curl, wget, build-essential)
+    
+    Returns:
+        Dict with:
+        - success: bool
+        - packages_installed: List[str]
+        - missing_packages: List[str]
+        - installation_time_ms: float
+        - message: str
+    
+    Examples:
+        - Bootstrap standard: deployment-container-bootstrap ctid=108
+        - Custom packages: deployment-container-bootstrap ctid=108 packages='["nodejs", "npm"]'
+    """
+    proxmox_host = os.getenv("PROXMOX_HOST", "localhost")
+    ssh_key = os.getenv("PROXMOX_SSH_KEY")
+    
+    tools = DeploymentTools(proxmox_host, ssh_key=ssh_key)
+    result = tools.container_bootstrap(ctid, packages=packages, timeout=120)
+    
+    return result
+
+
+@server.tool("deployment-pct-deploy-service")
+async def deployment_pct_deploy_service(
+    ctid: int,
+    repo_url: str,
+    port: int,
+    app_name: str,
+    systemd_user: str = "root"
+) -> Dict[str, Any]:
+    """
+    Deploy a FastAPI/Python service to a container in one call.
+    
+    Automates: git clone, venv setup, pip install, systemd service creation, and startup.
+    Saves ~10 minutes per deployment (vs manual steps).
+    
+    Error handling includes:
+    - Port already in use → returns occupying process info
+    - Repo not found → returns git error
+    - Venv creation failed → returns pip error
+    - systemd service won't start → returns journal logs
+    
+    Args:
+        ctid: Container ID
+        repo_url: Git repository URL (e.g., https://github.com/user/repo)
+        port: Port service listens on (e.g., 8004)
+        app_name: Application name (used for service name and directory /opt/{app_name})
+        systemd_user: User to run service as (default: root)
+    
+    Returns:
+        Dict with:
+        - success: bool
+        - app_name: str
+        - port: int
+        - service_status: str ("active", "failed", "error")
+        - pid: int or None
+        - uptime_seconds: int or None
+        - logs_excerpt: str (last 10 journal entries)
+        - deployment_time_ms: float
+        - message: str
+    
+    Examples:
+        - Deploy FastAPI app: deployment-pct-deploy-service ctid=108 repo_url="https://github.com/instanceone-cloud/edinprint3d-beta" port=8004 app_name="edinprint3d"
+        - Deploy with custom user: deployment-pct-deploy-service ctid=108 repo_url="..." port=8080 app_name="myapp" systemd_user="appuser"
+    """
+    proxmox_host = os.getenv("PROXMOX_HOST", "localhost")
+    ssh_key = os.getenv("PROXMOX_SSH_KEY")
+    
+    tools = DeploymentTools(proxmox_host, ssh_key=ssh_key)
+    result = tools.pct_deploy_service(
+        ctid=ctid,
+        repo_url=repo_url,
+        port=port,
+        app_name=app_name,
+        systemd_user=systemd_user,
+        timeout=300
+    )
+    
+    return result
+
+
+@server.tool("deployment-nginx-add-upstream")
+async def deployment_nginx_add_upstream(
+    domain: str,
+    ctid: int,
+    port: int,
+    cert_provider: str = "letsencrypt",
+    email: str = "admin@instanceone.co"
+) -> Dict[str, Any]:
+    """
+    Configure nginx upstream and SSL certificate for a new domain.
+    
+    Automates: Let's Encrypt cert generation, nginx config creation, validation, and reload.
+    Prevents bugs like cert mismatch (zabbix cert served on wrong domain).
+    Saves ~8 minutes per domain configuration.
+    
+    Error handling includes:
+    - Domain already configured → returns existing config
+    - Cert generation fails → returns certbot error
+    - Nginx config invalid → reverts and returns validation error
+    - Cert not found → returns path and troubleshooting info
+    
+    Args:
+        domain: Domain name (e.g., "beta.edinprint3d.co.uk")
+        ctid: Container ID running the service (service at 10.0.0.{ctid}:{port})
+        port: Service port inside container
+        cert_provider: Certificate provider (default: "letsencrypt")
+        email: Email for Let's Encrypt (default: admin@instanceone.co)
+    
+    Returns:
+        Dict with:
+        - success: bool
+        - domain: str
+        - upstream_ip: str (10.0.0.{ctid})
+        - upstream_port: int
+        - cert_path: str
+        - cert_expiry: str (openssl date format, e.g., "notAfter=Mar 18 12:34:56 2027 GMT")
+        - nginx_status: str ("active", "already_exists", "cert_generation_failed", "config_validation_failed", etc.)
+        - configuration_time_ms: float
+        - message: str
+    
+    Examples:
+        - Add new domain: deployment-nginx-add-upstream domain="beta.edinprint3d.co.uk" ctid=108 port=8004
+        - Custom email: deployment-nginx-add-upstream domain="api.example.com" ctid=109 port=8080 email="ops@example.com"
+    """
+    proxmox_host = os.getenv("PROXMOX_HOST", "localhost")
+    ssh_key = os.getenv("PROXMOX_SSH_KEY")
+    proxy_gateway_ctid = int(os.getenv("PROXMOX_PROXY_GATEWAY_CTID", "100"))
+    
+    tools = DeploymentTools(proxmox_host, ssh_key=ssh_key, proxy_gateway_ctid=proxy_gateway_ctid)
+    result = tools.nginx_add_upstream(
+        domain=domain,
+        ctid=ctid,
+        port=port,
+        cert_provider=cert_provider,
+        email=email,
+        timeout=120
+    )
     
     return result
 
